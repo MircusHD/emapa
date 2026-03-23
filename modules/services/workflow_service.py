@@ -9,6 +9,7 @@ from modules.database.models import User, Department, DocType, Document, Approva
 from modules.config import DG_DEPT, sig_abs_path, abs_upload_path, final_abs_path
 from modules.utils.files import normalize_dept, safe_filename
 from modules.departments.dept_service import get_descendant_departments
+from modules.services.log_service import log_event
 
 
 def sig_rel_path(doc_id: str, step_order: int, username: str) -> str:
@@ -102,6 +103,36 @@ def resolve_step_to_approver(step: dict, doc_department: str) -> Optional[str]:
     return None
 
 
+def get_available_escalation_users(doc_id: str, current_approver: str) -> List[str]:
+    """
+    Returnează toți șefii de departament activi care nu sunt deja în workflow-ul documentului
+    și care nu sunt utilizatorul curent.
+    """
+    with SessionLocal() as db:
+        existing = set(
+            db.execute(
+                select(Approval.approver_username).where(Approval.document_id == doc_id)
+            ).scalars().all()
+        )
+        existing.add(current_approver)
+
+        depts = db.execute(select(Department)).scalars().all()
+        result: List[str] = []
+        seen: set = set()
+        for dept in depts:
+            head = dept.head_username
+            if not head or head in existing or head in seen:
+                continue
+            u = db.execute(
+                select(User).where(User.username == head, User.is_active == True)
+            ).scalar_one_or_none()
+            if u:
+                result.append(head)
+                seen.add(head)
+
+    return result
+
+
 def user_can_view_document(doc: Document, user: dict) -> bool:
     if user.get("role") in ("admin", "secretariat"):
         return True
@@ -147,22 +178,34 @@ def start_workflow(doc_id: str, actor: dict) -> Tuple[bool, str]:
                     step_order=i,
                     approver_username=uname,
                     status="PENDING" if i == 1 else "WAITING",
+                    created_at=datetime.now(),
                 )
             )
 
         doc.status = "PENDING"
         doc.current_step = 1
         db.commit()
-        return True, "Workflow pornit."
+    log_event("document_workflow_start", category="document", username=actor.get("username"), details=f"Workflow pornit | {len(approvers)} pași", target_id=doc_id)
+    return True, "Workflow pornit."
 
 
-def decide(doc_id: str, approver: str, decision: str, comment: str, signature_png_bytes: Optional[bytes]) -> Tuple[bool, str]:
+def decide(
+    doc_id: str,
+    approver: str,
+    decision: str,
+    comment: str,
+    signature_png_bytes: Optional[bytes],
+    escalate_to: Optional[List[str]] = None,
+) -> Tuple[bool, str]:
     decision = (decision or "").strip().upper()
-    if decision not in ("APPROVE", "REJECT"):
+    if decision not in ("APPROVE", "REJECT", "APPROVE_AND_ESCALATE"):
         return False, "Decizie invalida."
 
-    if decision == "APPROVE" and not signature_png_bytes:
+    if decision in ("APPROVE", "APPROVE_AND_ESCALATE") and not signature_png_bytes:
         return False, "Semnatura este obligatorie la APROBARE."
+
+    if decision == "APPROVE_AND_ESCALATE" and not escalate_to:
+        return False, "Trebuie specificata cel putin o persoana pentru vizare."
 
     with SessionLocal() as db:
         doc = db.execute(select(Document).where(Document.id == doc_id)).scalar_one_or_none()
@@ -186,7 +229,7 @@ def decide(doc_id: str, approver: str, decision: str, comment: str, signature_pn
         if cur.approver_username != approver:
             return False, "Nu esti aprobatorul pasului curent."
 
-        now = datetime.utcnow()
+        now = datetime.now()
         cur.comment = (comment or "").strip() or None
         cur.decided_at = now
 
@@ -194,6 +237,7 @@ def decide(doc_id: str, approver: str, decision: str, comment: str, signature_pn
             cur.status = "REJECTED"
             doc.status = "REJECTED"
             db.commit()
+            log_event("document_reject", category="document", username=approver, details=f"Respins | Pas: {cur.step_order} | Comentariu: {comment or '—'}", target_id=doc_id)
             return True, "RESPINS."
 
         # approve
@@ -205,9 +249,59 @@ def decide(doc_id: str, approver: str, decision: str, comment: str, signature_pn
             with open(sig_abs_path(rel), "wb") as f:
                 f.write(signature_png_bytes)
             cur.signature_path = rel
-            cur.signed_at = datetime.utcnow().isoformat()
+            cur.signed_at = datetime.now().isoformat()
         except Exception as e:
             return False, f"Nu am putut salva semnatura: {e}"
+
+        if decision == "APPROVE_AND_ESCALATE":
+            # Validare: toți din lista trebuie să fie disponibili
+            available = get_available_escalation_users(doc_id, approver)
+            for u in escalate_to:
+                if u not in available:
+                    return False, f"Utilizatorul '{u}' nu este disponibil pentru vizare."
+
+            # Creăm nodurile de escalare secvențial: primul PENDING, restul WAITING
+            for j, esc_user in enumerate(escalate_to):
+                db.add(
+                    Approval(
+                        id=str(uuid.uuid4()),
+                        document_id=doc.id,
+                        step_order=doc.current_step,
+                        approver_username=esc_user,
+                        status="PENDING" if j == 0 else "WAITING",
+                        is_escalation_node=1,
+                        created_at=datetime.now(),
+                    )
+                )
+            # doc.current_step rămâne neschimbat
+            db.commit()
+            from modules.utils.formatting import user_display_name
+            names = ", ".join(user_display_name(u) for u in escalate_to)
+            log_event("document_escalate", category="document", username=approver,
+                      details=f"Aprobat + vizare: {names} | Pas: {cur.step_order}",
+                      target_id=doc_id)
+            return True, f"Aprobat si trimis spre vizare: {names}."
+
+        # APPROVE normal: verificăm mai întâi dacă mai sunt noduri de escalare în așteptare
+        next_esc = db.execute(
+            select(Approval).where(
+                and_(
+                    Approval.document_id == doc.id,
+                    Approval.step_order == cur.step_order,
+                    Approval.status == "WAITING",
+                    Approval.is_escalation_node == 1,
+                )
+            ).order_by(Approval.created_at).limit(1)
+        ).scalar_one_or_none()
+
+        if next_esc:
+            next_esc.status = "PENDING"
+            db.commit()
+            from modules.utils.formatting import user_display_name
+            log_event("document_approve", category="document", username=approver,
+                      details=f"Vizat pas {cur.step_order} | urmează {next_esc.approver_username}",
+                      target_id=doc_id)
+            return True, f"Vizat. Urmează {user_display_name(next_esc.approver_username)}."
 
         nxt_order = doc.current_step + 1
         nxt = db.execute(
@@ -220,10 +314,12 @@ def decide(doc_id: str, approver: str, decision: str, comment: str, signature_pn
             nxt.status = "PENDING"
             doc.current_step = nxt_order
             db.commit()
+            log_event("document_approve", category="document", username=approver, details=f"Aprobat pas {cur.step_order} | urmează pas {nxt_order}", target_id=doc_id)
             return True, "APROBAT (urmatorul pas)."
 
         doc.status = "APPROVED"
         db.commit()
+        log_event("document_approve_final", category="document", username=approver, details=f"Aprobat final (pas {cur.step_order})", target_id=doc_id)
 
     # generate final pdf — import lazy pentru a evita circular import
     from modules.services.pdf_service import build_final_pdf
@@ -250,7 +346,8 @@ def cancel_to_draft(doc_id: str, actor: dict) -> Tuple[bool, str]:
         doc.status = "DRAFT"
         doc.current_step = 0
         db.commit()
-        return True, "Anulat la CIORNA."
+    log_event("document_cancel_to_draft", level="WARNING", category="document", username=actor.get("username"), details="Workflow anulat → CIORNĂ", target_id=doc_id)
+    return True, "Anulat la CIORNA."
 
 
 def cancel_document(doc_id: str, actor: dict) -> Tuple[bool, str]:
@@ -270,7 +367,8 @@ def cancel_document(doc_id: str, actor: dict) -> Tuple[bool, str]:
         doc.status = "CANCELLED"
         doc.current_step = 0
         db.commit()
-        return True, "Document marcat ANULAT."
+    log_event("document_cancel", level="WARNING", category="document", username=actor.get("username"), details="Document marcat ANULAT", target_id=doc_id)
+    return True, "Document marcat ANULAT."
 
 
 def sterge_definitiv_document(doc_id: str, actor: dict) -> Tuple[bool, str]:
@@ -321,4 +419,5 @@ def sterge_definitiv_document(doc_id: str, actor: dict) -> Tuple[bool, str]:
         db.delete(doc)
         db.commit()
 
+    log_event("document_delete", level="WARNING", category="document", username=actor.get("username"), details="Document șters definitiv (fișier + semnături + DB)", target_id=doc_id)
     return True, "Document sters definitiv (fisier + semnaturi + baza de date)."

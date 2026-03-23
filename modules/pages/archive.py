@@ -28,6 +28,7 @@ from modules.services.workflow_service import (
 from modules.services.pdf_service import build_final_pdf, build_current_pdf_bytes
 from modules.workflow.workflow_builder import render_workflow_builder, wf_pretty
 from modules.auth.auth import is_admin, is_secretariat
+from modules.services.log_service import log_event
 from modules.departments.dept_service import get_descendant_departments
 
 
@@ -121,7 +122,7 @@ def render_archive(auth_user: dict) -> None:
                     Document.doc_name.ilike(qq),
                     Document.title.ilike(qq),
                     Document.original_filename.ilike(qq),
-                    Document.tags.ilike(qq),
+                    Document.tags_json.ilike(qq),
                 ))
 
             docs = db.execute(stmt).scalars().all()
@@ -281,7 +282,7 @@ def render_archive(auth_user: dict) -> None:
                 "denumire_document": (d.doc_name or d.title or ""),
                 "department": d.department,
                 "status": ro_doc_status(d.status),
-                "reg_no": d.reg_no or "",
+                "reg_no": d.reg_no,
                 "reg_date": d.reg_date or "",
                 "creat_de": d.created_by,
                 "creat_la": d.created_at.strftime("%Y-%m-%d %H:%M:%S"),
@@ -493,6 +494,8 @@ def render_archive(auth_user: dict) -> None:
                     ui_result(False, "Document inexistent.")
                 else:
                     ok, msg = start_workflow(doc.id, auth_user)
+                    if ok:
+                        log_event("document_workflow_start", category="document", username=auth_user.get("username"), details=f"Workflow pornit din arhivă pentru doc {doc.public_id or doc.id}", target_id=doc.id)
                 ui_result(ok, msg)
 
         if st.button("Anuleaza workflow -> CIORNA (IN APROBARE)", key="btn_archive_cancel_to_draft"):

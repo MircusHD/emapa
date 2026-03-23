@@ -25,9 +25,10 @@ def build_final_pdf(doc_id: str) -> Tuple[bool, str]:
             return False, "Document inexistent."
         if doc.status != "APPROVED":
             return False, "PDF final se genereaza doar cand este APROBAT."
-        approvals = db.execute(
+        approvals_raw = db.execute(
             select(Approval).where(Approval.document_id == doc_id).order_by(Approval.step_order)
         ).scalars().all()
+        approvals = sorted(approvals_raw, key=lambda a: (a.step_order, a.created_at or datetime.min))
 
     op = abs_upload_path(doc.stored_path)
     if not os.path.exists(op):
@@ -60,17 +61,20 @@ def build_final_pdf(doc_id: str) -> Tuple[bool, str]:
     for a in approvals:
         status_ro = ro_approval_status(a.status)
         decided = a.decided_at.strftime("%Y-%m-%d %H:%M:%S") if a.decided_at else "-"
+        is_esc = bool(a.is_escalation_node)
+        indent = 60 if is_esc else 40
+        prefix = f"  [Vizare] Pas {a.step_order}" if is_esc else f"Pas {a.step_order}"
 
         c.setFont("Helvetica-Bold", 10)
-        c.drawString(40, y, f"Pas {a.step_order}: {user_display_with_title(a.approver_username)} - {status_ro}")
+        c.drawString(indent, y, f"{prefix}: {user_display_with_title(a.approver_username)} - {status_ro}")
         c.setFont("Helvetica", 9)
-        c.drawString(40, y - 12, f"Data decizie: {decided}")
+        c.drawString(indent, y - 12, f"Data decizie: {decided}")
 
         if a.comment:
             cc = (a.comment or "").replace("\n", " ").strip()
             if len(cc) > 110:
                 cc = cc[:110] + "..."
-            c.drawString(40, y - 24, f"Comentariu: {cc}")
+            c.drawString(indent, y - 24, f"Comentariu: {cc}")
 
         if a.signature_path and os.path.exists(sig_abs_path(a.signature_path)):
             try:
@@ -124,9 +128,10 @@ def build_current_pdf_bytes(doc_id: str) -> Tuple[bool, bytes, str]:
         doc = db.execute(select(Document).where(Document.id == doc_id)).scalar_one_or_none()
         if not doc:
             return False, b"", "Document inexistent."
-        approvals = db.execute(
+        approvals_raw = db.execute(
             select(Approval).where(Approval.document_id == doc_id).order_by(Approval.step_order)
         ).scalars().all()
+        approvals = sorted(approvals_raw, key=lambda a: (a.step_order, a.created_at or datetime.min))
 
     op = abs_upload_path(doc.stored_path)
     if not os.path.exists(op):
@@ -167,17 +172,20 @@ def build_current_pdf_bytes(doc_id: str) -> Tuple[bool, bytes, str]:
     for a in approvals:
         status_ro = ro_approval_status(a.status)
         decided = a.decided_at.strftime("%Y-%m-%d %H:%M:%S") if a.decided_at else "-"
+        is_esc = bool(a.is_escalation_node)
+        indent = 60 if is_esc else 40
+        prefix = f"  [Vizare] Pas {a.step_order}" if is_esc else f"Pas {a.step_order}"
 
         c.setFont("Helvetica-Bold", 10)
-        c.drawString(40, y, f"Pas {a.step_order}: {user_display_with_title(a.approver_username)} - {status_ro}")
+        c.drawString(indent, y, f"{prefix}: {user_display_with_title(a.approver_username)} - {status_ro}")
         c.setFont("Helvetica", 9)
-        c.drawString(40, y - 12, f"Data decizie: {decided}")
+        c.drawString(indent, y - 12, f"Data decizie: {decided}")
 
         if a.comment:
             cc = (a.comment or "").replace("\n", " ").strip()
             if len(cc) > 110:
                 cc = cc[:110] + "..."
-            c.drawString(40, y - 24, f"Comentariu: {cc}")
+            c.drawString(indent, y - 24, f"Comentariu: {cc}")
 
         if a.signature_path and os.path.exists(sig_abs_path(a.signature_path)):
             try:

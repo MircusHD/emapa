@@ -71,6 +71,11 @@ def auto_migrate_and_seed() -> None:
 
     _sqlite_add_column_if_missing("approvals", "signature_path", "signature_path TEXT")
     _sqlite_add_column_if_missing("approvals", "signed_at", "signed_at TEXT")
+    _sqlite_add_column_if_missing("approvals", "escalated_to_username", "escalated_to_username TEXT")
+    _sqlite_add_column_if_missing("approvals", "escalation_status", "escalation_status TEXT")
+    _sqlite_add_column_if_missing("approvals", "escalation_chain_json", "escalation_chain_json TEXT")
+    _sqlite_add_column_if_missing("approvals", "is_escalation_node", "is_escalation_node INTEGER NOT NULL DEFAULT 0")
+    _sqlite_add_column_if_missing("approvals", "created_at", "created_at DATETIME")
 
 
     # auth_tokens table (remember-me)
@@ -97,11 +102,130 @@ def auto_migrate_and_seed() -> None:
         pass
 
 
+    # sesizari table
+    try:
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sesizari (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                numar_inregistrare TEXT NOT NULL UNIQUE,
+                titlu TEXT NOT NULL,
+                descriere TEXT,
+                pdf_path TEXT,
+                autor TEXT NOT NULL,
+                departament TEXT,
+                user_responsabil TEXT,
+                status TEXT NOT NULL DEFAULT 'nou',
+                created_at DATETIME NOT NULL,
+                trimis_la_dg_at DATETIME,
+                distribuit_la_dept_at DATETIME,
+                atribuit_la_user_at DATETIME,
+                finalizat_at DATETIME,
+                observatii_finalizare TEXT
+            )
+            """
+        )
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+    # sesizare_files table
+    try:
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sesizare_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sesizare_id INTEGER NOT NULL,
+                fisier_path TEXT NOT NULL,
+                tip TEXT NOT NULL,
+                uploaded_by TEXT NOT NULL,
+                uploaded_at DATETIME NOT NULL,
+                descriere TEXT
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_sesizare_files_sesizare_id ON sesizare_files(sesizare_id)")
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+    # system_logs table
+    try:
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME NOT NULL DEFAULT (datetime('now')),
+                level TEXT NOT NULL DEFAULT 'INFO',
+                category TEXT NOT NULL DEFAULT 'system',
+                action TEXT NOT NULL,
+                username TEXT,
+                details TEXT,
+                target_id TEXT
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_system_logs_timestamp ON system_logs(timestamp)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_system_logs_username ON system_logs(username)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_system_logs_level ON system_logs(level)")
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+    _sqlite_add_column_if_missing("system_logs", "ip_address", "ip_address TEXT")
+
+    # migrate sesizari columns (in case table existed with fewer columns)
+    _sqlite_add_column_if_missing("sesizari", "numar_inregistrare",    "numar_inregistrare TEXT NOT NULL DEFAULT ''")
+    _sqlite_add_column_if_missing("sesizari", "titlu",                 "titlu TEXT NOT NULL DEFAULT ''")
+    _sqlite_add_column_if_missing("sesizari", "descriere",             "descriere TEXT")
+    _sqlite_add_column_if_missing("sesizari", "pdf_path",              "pdf_path TEXT")
+    _sqlite_add_column_if_missing("sesizari", "autor",                 "autor TEXT NOT NULL DEFAULT ''")
+    _sqlite_add_column_if_missing("sesizari", "departament",           "departament TEXT")
+    _sqlite_add_column_if_missing("sesizari", "user_responsabil",      "user_responsabil TEXT")
+    _sqlite_add_column_if_missing("sesizari", "status",                "status TEXT NOT NULL DEFAULT 'nou'")
+    _sqlite_add_column_if_missing("sesizari", "created_at",            "created_at DATETIME NOT NULL DEFAULT (datetime('now'))")
+    _sqlite_add_column_if_missing("sesizari", "trimis_la_dg_at",       "trimis_la_dg_at DATETIME")
+    _sqlite_add_column_if_missing("sesizari", "distribuit_la_dept_at", "distribuit_la_dept_at DATETIME")
+    _sqlite_add_column_if_missing("sesizari", "atribuit_la_user_at",   "atribuit_la_user_at DATETIME")
+    _sqlite_add_column_if_missing("sesizari", "finalizat_at",          "finalizat_at DATETIME")
+    _sqlite_add_column_if_missing("sesizari", "observatii_finalizare", "observatii_finalizare TEXT")
+    _sqlite_add_column_if_missing("sesizari", "necesita_aprobare_dg",   "necesita_aprobare_dg INTEGER NOT NULL DEFAULT 0")
+    _sqlite_add_column_if_missing("sesizari", "dg_aprobat_la",          "dg_aprobat_la DATETIME")
+    _sqlite_add_column_if_missing("sesizari", "dg_semnatura_path",      "dg_semnatura_path TEXT")
+    _sqlite_add_column_if_missing("sesizari", "final_pdf_path",         "final_pdf_path TEXT")
+    _sqlite_add_column_if_missing("sesizari", "necesita_aprobare_sef",  "necesita_aprobare_sef INTEGER NOT NULL DEFAULT 0")
+    _sqlite_add_column_if_missing("sesizari", "sef_aprobat_la",         "sef_aprobat_la DATETIME")
+    _sqlite_add_column_if_missing("sesizari", "sef_semnatura_path",     "sef_semnatura_path TEXT")
+    _sqlite_add_column_if_missing("sesizari", "sef_aprobator_username", "sef_aprobator_username TEXT")
+    _sqlite_add_column_if_missing("sesizari", "vizare_chain_json",      "vizare_chain_json TEXT")
+    _sqlite_add_column_if_missing("sesizari", "vizare_current_approver","vizare_current_approver TEXT")
+
     # unique index for public_id (best effort)
     try:
         con = sqlite3.connect(DB_PATH)
         cur = con.cursor()
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_documents_public_id ON documents(public_id)")
+        # performance indexes - documents
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_documents_status ON documents(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_documents_department ON documents(department)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_documents_created_by ON documents(created_by)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_documents_created_at ON documents(created_at)")
+        # performance indexes - sesizari
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_sesizari_status ON sesizari(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_sesizari_departament ON sesizari(departament)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_sesizari_user_responsabil ON sesizari(user_responsabil)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_sesizari_created_at ON sesizari(created_at)")
+        # performance indexes - users
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_users_department ON users(department)")
         con.commit()
         con.close()
     except Exception:

@@ -93,7 +93,7 @@ def rememberme_bootstrap_js() -> None:
 def create_remember_token(username: str) -> str:
     token = secrets.token_urlsafe(32)
     th = _sha256_hex(token)
-    exp = datetime.utcnow() + timedelta(days=REMEMBER_DAYS)
+    exp = datetime.now() + timedelta(days=REMEMBER_DAYS)
     with SessionLocal() as db:
         db.add(
             AuthToken(
@@ -101,7 +101,7 @@ def create_remember_token(username: str) -> str:
                 username=username,
                 token_hash=th,
                 expires_at=exp,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(),
                 last_used_at=None,
             )
         )
@@ -113,7 +113,7 @@ def validate_remember_token(token: str) -> Optional[dict]:
     if not tok:
         return None
     th = _sha256_hex(tok)
-    now = datetime.utcnow()
+    now = datetime.now()
     with SessionLocal() as db:
         t = db.execute(select(AuthToken).where(and_(AuthToken.token_hash == th))).scalar_one_or_none()
         if not t:
@@ -143,18 +143,44 @@ def validate_remember_token(token: str) -> Optional[dict]:
         }
 
 def revoke_current_remember_token() -> None:
-    th = (st.session_state.get("remember_token_hash") or "").strip()
-    if not th:
-        return
+    """Revoca toate tokenurile userului curent din DB (nu doar cel din sesiune)."""
+    username = ""
+    try:
+        username = (st.session_state.get("auth_user") or {}).get("username", "")
+    except Exception:
+        pass
+
     try:
         with SessionLocal() as db:
-            t = db.execute(select(AuthToken).where(AuthToken.token_hash == th)).scalar_one_or_none()
-            if t:
-                db.delete(t)
-                db.commit()
+            if username:
+                tokens = db.execute(select(AuthToken).where(AuthToken.username == username)).scalars().all()
+                for t in tokens:
+                    db.delete(t)
+            else:
+                # fallback: revoca doar tokenul din sesiune
+                th = (st.session_state.get("remember_token_hash") or "").strip()
+                if th:
+                    t = db.execute(select(AuthToken).where(AuthToken.token_hash == th)).scalar_one_or_none()
+                    if t:
+                        db.delete(t)
+            db.commit()
     except Exception:
         pass
     st.session_state["remember_token_hash"] = None
+
+def revoke_all_tokens_for_user(username: str) -> None:
+    """Revocă toate tokenurile unui user după username (folosit la reset parolă de admin)."""
+    if not username:
+        return
+    try:
+        with SessionLocal() as db:
+            tokens = db.execute(select(AuthToken).where(AuthToken.username == username)).scalars().all()
+            for t in tokens:
+                db.delete(t)
+            db.commit()
+    except Exception:
+        pass
+
 
 def rememberme_set_token_js(token: str) -> None:
     token_js = (token or "").replace("\\", "\\\\").replace('"', '\"')
@@ -172,6 +198,17 @@ def rememberme_set_token_js(token: str) -> None:
         }})();
         </script>
         """,
+        height=0,
+    )
+
+def rememberme_clear_token_js() -> None:
+    """Șterge token din localStorage, fără reload (Streamlit face rerun separat)."""
+    components.html(
+        f"""<script>
+        (function() {{
+          window.localStorage.removeItem("{REMEMBER_STORAGE_KEY}");
+        }})();
+        </script>""",
         height=0,
     )
 

@@ -14,6 +14,7 @@ from modules.services.document_service import generate_public_id
 from modules.services.workflow_service import start_workflow
 from modules.workflow.workflow_builder import render_workflow_builder
 from modules.auth.auth import is_dg
+from modules.services.log_service import log_event
 from modules.utils.formatting import ro_doc_status
 
 
@@ -65,7 +66,7 @@ def render_upload(auth_user: dict) -> None:
                     st.info(f"Document existent: {dup.id} | status: {ro_doc_status(dup.status)}")
                     st.session_state.last_created_doc_id = dup.id
                 else:
-                    now = datetime.utcnow()
+                    now = datetime.now()
                     doc_id = str(uuid.uuid4())
                     pub_id = generate_public_id()
 
@@ -103,6 +104,7 @@ def render_upload(auth_user: dict) -> None:
                     )
                     db.add(doc)
                     db.commit()
+                    log_event("upload_document", category="document", username=auth_user["username"], details=f"Document: {doc_name.strip()}", target_id=pub_id)
                     st.success("Ciorna creata.")
                     st.session_state.last_created_doc_id = doc_id
 

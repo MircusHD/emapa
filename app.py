@@ -1,6 +1,5 @@
 # app.py - eMapa Apa Prod (refactored)
 # Punct de intrare: sidebar + login + routing catre module
-
 import os
 import streamlit as st
 import streamlit.components.v1 as components
@@ -14,6 +13,7 @@ from modules.auth.auth import is_admin, is_secretariat, is_dg, _bcrypt_check
 from modules.auth.remember_me import (
     rememberme_bootstrap_js,
     rememberme_set_token_js,
+    rememberme_clear_token_js,
     rememberme_clear_token_js_and_reload,
     create_remember_token,
     validate_remember_token,
@@ -35,6 +35,7 @@ from modules.pages.secretariat_page import render_secretariat
 from modules.pages.admin import render_admin
 from modules.dashboard import render_dashboard
 from modules.sesizari.sesizari_ui import render_sesizari
+from modules.services.log_service import log_event
 
 # -----------------------
 # App init
@@ -77,16 +78,16 @@ with st.sidebar:
     if "auth_user" not in st.session_state:
         st.session_state.auth_user = None
 
-    # JS bootstrap pentru auto-login (citește token din localStorage, îl trimite temporar în ?rt=..., apoi curăță URL-ul)
-    rememberme_bootstrap_js()
-
     # Auto-login (daca exista rt in URL)
     if st.session_state.auth_user is None:
+        # JS bootstrap rulează DOAR dacă nu e autentificat — evită race condition la logout
+        rememberme_bootstrap_js()
         rt = _get_query_param("rt")
         if rt:
             au = validate_remember_token(rt)
             if au:
                 st.session_state.auth_user = au
+                log_event("login_auto", category="auth", username=au.get("username"), details="Auto-login via remember-me token")
                 _set_query_params_without_rt()
                 st.rerun()
 
@@ -101,7 +102,11 @@ with st.sidebar:
         if ok:
             with SessionLocal() as db:
                 user = db.execute(select(User).where(User.username == u.strip(), User.is_active == True)).scalar_one_or_none()
-            if user and _bcrypt_check(p, user.password_hash):
+            # Execută bcrypt întotdeauna pentru a preveni timing attacks (enumerare useri)
+            _dummy = "$2b$12$KIXyGbNwCvNaFnkUpCxKbuHJzqVqiKCJWbEBkC8JvmFX5GHaXdummy"
+            _check_hash = user.password_hash if user else _dummy
+            _password_ok = _bcrypt_check(p, _check_hash)
+            if user and _password_ok:
                 st.session_state.auth_user = {
                     "id": user.id,
                     "username": user.username,
@@ -111,9 +116,11 @@ with st.sidebar:
                 if remember_me:
                     tok = create_remember_token(user.username)
                     rememberme_set_token_js(tok)
+                log_event("login", category="auth", username=user.username, details="Login reușit")
                 st.success("Autentificat.")
                 st.rerun()
             else:
+                log_event("login_failed", level="WARNING", category="auth", username=u.strip(), details="Credențiale invalide sau user inactiv")
                 st.error("Credentiale invalide (sau user inactiv).")
 
         st.stop()
@@ -150,13 +157,20 @@ with st.sidebar:
                 ui_result(okd, msgd)
                 st.rerun()
 
+    st.markdown(
+        "<small style='color:#888;'>© 2026 eMapa Apa Prod<br>Dezvoltat de <b>Mircea Carmanus</b></small>",
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
     if st.button("Deconectare", key="btn_logout"):
+        log_event("logout", category="auth", username=st.session_state.auth_user.get("username"))
         # revoca tokenul curent (daca a fost folosit)
         revoke_current_remember_token()
         # sterge token local (browser) ca sa nu faca auto-login dupa logout
-        rememberme_clear_token_js_and_reload()
+        rememberme_clear_token_js()
         st.session_state.auth_user = None
-        st.stop()
+        st.rerun()
 
     st.divider()
 
